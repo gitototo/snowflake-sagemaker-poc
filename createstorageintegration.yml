@@ -1,0 +1,393 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  StorageStackName:
+    Type: String
+    Description: "Name of the S3 bucket to be created"
+    AllowedPattern: ".+"
+    Default: "snowflake-sagemaker"
+  s3BucketName:
+    Type: String
+    Description: "Name of the S3 bucket to be created"
+    AllowedPattern: ".+"
+    Default: "snowflake-sagemaker-vhol-<accountId>-<initials>"
+  snowflakeStorageIntegrationName:
+    Type: String
+    Description: "Name of the Storage Integration to be created"
+    AllowedPattern: ".+"
+    Default: "SMSNOW"      
+  snowflakeUsername:
+    Type: String
+    Description: "Snowflake username"
+  snowflakePassword:
+    NoEcho: true  
+    Type: String
+    Description: "Snowflake password"
+  snowflakeAccount:
+    Type: String
+    Description: "Snowflake account"
+  snowflakeRole:
+    Type: String
+    Description: "Snowflake Role with permissions to create Storage Integrations, API Integrations and Functions"
+    MinLength: 1    
+Mappings:
+  AWSSettings:
+    Constants:
+      codeBucket: snowflake-corp-se-workshop
+      pathToLayerCode: VHOL_Snowflake_Data_Wrangler/V2/cft/snowflake-connector-python.zip
+      pathToLambdaCode: VHOL_Snowflake_Data_Wrangler/V2/cft/create-resources.zip
+Resources:
+  SnowflakeSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: "Secret to store Snowflake credential"
+      SecretString:
+                Fn::Join:
+                - ''
+                - - '{"username": "'
+                  - Ref: snowflakeUsername
+                  - '","password": "'
+                  - Ref: snowflakePassword
+                  - '","accountid": "'
+                  - Ref: snowflakeAccount
+                  - '"}'
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-access-for-account
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:iam::'
+                - Ref: AWS::AccountId
+                - :root
+          Action: kms:*
+          Resource: '*'
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref s3BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt KMSKey.Arn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+  SnowflakeAutoMLExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Description: IAM Role used to execute the AutoML jobs from Snowflake
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSageMakerFullAccess'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/cleardata_boundary'
+      Policies:
+        - PolicyName: s3-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:DeleteObject'
+                  - 's3:DeleteObjectVersion'
+                  - 's3:ListBucket'
+                Resource: !Join ['/', [!GetAtt S3Bucket.Arn, '*']]
+        - PolicyName: kms-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:CreateGrant'
+                  - "kms:Decrypt"
+                  - "kms:DescribeKey"
+                  - "kms:Encrypt"
+                  - "kms:GenerateDataKey*"
+                  - "kms:ReEncrypt*"
+                Resource:
+                  - !Join
+                    - ":"
+                    - - "arn"
+                      - !Ref AWS::Partition
+                      - "kms"
+                      - !Ref AWS::Region
+                      - !Ref AWS::AccountId
+                      - "alias/aws/secretsmanager"
+                  - !GetAtt KMSKey.Arn
+        - PolicyName: secrets-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref SnowflakeSecret
+  CopyZipsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role used to copy Snowflake libraries form the shared repository
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: '/'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchLogsFullAccess'
+      Policies:
+        - PolicyName: kms-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:CreateGrant'
+                  - "kms:Decrypt"
+                  - "kms:DescribeKey"
+                  - "kms:Encrypt"
+                  - "kms:GenerateDataKey*"
+                  - "kms:ReEncrypt*"
+                Resource:
+                  - !Join
+                    - ":"
+                    - - "arn"
+                      - !Ref AWS::Partition
+                      - "kms"
+                      - !Ref AWS::Region
+                      - !Ref AWS::AccountId
+                      - "alias/aws/secretsmanager"
+                  - !GetAtt KMSKey.Arn
+        - PolicyName: s3-dest-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - !GetAtt S3Bucket.Arn
+                      - '/*'
+        - PolicyName: s3-src-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource: '*'                
+  CreateSnowflakeResourcesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role used to create Snowflake resources from the CloudFormation template
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: '/'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchLogsFullAccess'
+      Policies:
+        - PolicyName: kms-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:CreateGrant'
+                  - "kms:Decrypt"
+                  - "kms:DescribeKey"
+                  - "kms:Encrypt"
+                  - "kms:GenerateDataKey*"
+                  - "kms:ReEncrypt*"
+                Resource:
+                  - !Join
+                    - ":"
+                    - - "arn"
+                      - !Ref AWS::Partition
+                      - "kms"
+                      - !Ref AWS::Region
+                      - !Ref AWS::AccountId
+                      - "alias/aws/secretsmanager"
+                  - !GetAtt KMSKey.Arn
+        - PolicyName: secrets-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref SnowflakeSecret
+        - PolicyName: update-iam-role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:UpdateAssumeRolePolicy'
+                Resource: !GetAtt SnowflakeAutoMLExecutionRole.Arn
+  CopyZipsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import os
+          import requests
+          import time
+
+          EMPTY_RESPONSE_DATA = {}
+          FAILED = 'FAILED'
+          SUCCESS = 'SUCCESS'
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            logger.info('Starting the copy of shared libraries')
+            # Delete
+            if event['RequestType'] == 'Delete':
+                sendResponse(event, context, SUCCESS, EMPTY_RESPONSE_DATA)
+                return
+
+            try:
+                s3_destination_bucket_name = event['ResourceProperties']['DestBucket']
+                s3_source_bucket_name = event['ResourceProperties']['SourceBucket']
+                object_keys = event['ResourceProperties']['ObjectKeys']
+
+                copy_objects(s3_source_bucket_name, s3_destination_bucket_name, object_keys)
+                logger.info("Shared files copied successfully")
+
+                sendResponse(event, context, SUCCESS, EMPTY_RESPONSE_DATA)
+                logger.info('Copy of shared libraries finished')
+            except:
+                logger.exception("There was a problem copying the files")
+                sendResponse(event, context, FAILED, EMPTY_RESPONSE_DATA)
+                return
+
+          def copy_objects(s3_source_bucket_name, s3_destination_bucket_name, object_keys):
+                s3 = boto3.resource('s3')
+                destination_bucket = s3.Bucket(s3_destination_bucket_name)
+
+                for object_key in object_keys:
+                  copy_object(s3_source_bucket_name, destination_bucket, object_key)
+
+          def copy_object(s3_source_bucket_name, destination_bucket, object_key):
+              logger.info('Copying object key: ' + object_key)
+              copy_source = {
+                  'Bucket': s3_source_bucket_name,
+                  'Key': object_key
+              }
+              destination_bucket.copy(copy_source, object_key)
+
+          def sendResponse(event, context, responseStatus, responseData):
+              responseBody = {'Status': responseStatus,
+                              'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                              'PhysicalResourceId': context.log_stream_name,
+                              'StackId': event['StackId'],
+                              'RequestId': event['RequestId'],
+                              'LogicalResourceId': event['LogicalResourceId'],
+                              'Data': responseData}
+              req = requests.put(event['ResponseURL'], data=json.dumps(responseBody))
+              if req.status_code != 200:
+                  raise Exception('Received a non-200 HTTP response while sending response to CloudFormation.')
+              return
+      Handler: index.lambda_handler
+      Role: !GetAtt CopyZipsRole.Arn
+      Runtime: python3.7
+      Timeout: 600
+  CopyZips:
+    Type: Custom::CopyZips
+    DependsOn:
+      - S3Bucket
+      - CopyZipsRole
+    Properties:
+      ServiceToken: !GetAtt CopyZipsLambda.Arn
+      DestBucket: !Ref s3BucketName
+      SourceBucket: !FindInMap [AWSSettings, Constants, codeBucket]
+      ObjectKeys:
+        - !FindInMap [AWSSettings, Constants, pathToLayerCode]
+        - !FindInMap [AWSSettings, Constants, pathToLambdaCode]
+  CreateSnowflakeResourcesLambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    DependsOn:
+      - CopyZips    
+    Properties:
+      CompatibleRuntimes:
+        - python3.7
+      Content:
+        S3Bucket: !Ref s3BucketName
+        S3Key: !FindInMap [AWSSettings, Constants, pathToLayerCode]
+      Description: 'Layer to download Snowflake driver'
+  CreateSnowflakeResourcesLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref s3BucketName
+        S3Key: !FindInMap [AWSSettings, Constants, pathToLambdaCode]
+      Layers:
+            - Ref: CreateSnowflakeResourcesLambdaLayer
+      Handler: create-resources.lambda_handler
+      Role: !GetAtt CreateSnowflakeResourcesExecutionRole.Arn
+      Runtime: python3.7
+      Timeout: 600
+      Environment:
+        Variables:
+          Region: !Sub "${AWS::Region}"
+          RoleARN: !GetAtt SnowflakeAutoMLExecutionRole.Arn
+          RoleName: !Ref SnowflakeAutoMLExecutionRole
+          S3BucketName: !Ref s3BucketName
+          StorageIntegrationName: !Ref snowflakeStorageIntegrationName
+          SecretArn: !Ref SnowflakeSecret
+          SnowflakeRole: !Ref snowflakeRole
+          StackName: !Sub "${AWS::StackName}"
+  SnowflakeResources:
+    Type: Custom::SnowflakeResources
+    Properties:
+      ServiceToken: !Sub
+        - "${lambdaArn}"
+        - lambdaArn: !GetAtt CreateSnowflakeResourcesLambda.Arn
+Outputs:
+  s3BucketName:
+      Value: !Ref s3BucketName 
+  SnowflakeStorageIntegrationName: 
+    Value: !Sub
+        - "${StorageIntName}_STORAGE_INTEGRATION"
+        - StorageIntName: !Ref snowflakeStorageIntegrationName
+  SnowflakeSecret:
+      Value: !Ref SnowflakeSecret
+  KMSKey:
+      Value: !Ref KMSKey
