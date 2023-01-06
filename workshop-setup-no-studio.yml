@@ -152,7 +152,7 @@ Resources:
   StorageIntegrationStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://snowflake-corp-se-workshop.s3.us-west-1.amazonaws.com/VHOL_Snowflake_Data_Wrangler/V2/cft/createstorageintegration.yml
+      TemplateURL: https://github.com/gitototo/snowflake-sagemaker-poc/createstorageintegration.yml
       Parameters:
         StorageStackName: snowflake-sagemaker
         s3BucketName: !Sub
